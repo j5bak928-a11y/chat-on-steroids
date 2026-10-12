@@ -2737,6 +2737,36 @@ input[readonly] {
 .msg.rich .native-prompt-readonly li { margin: 0.2em 0; }
 .msg.rich .native-prompt-readonly em { color: var(--soft); font-size: 0.9em; }
 
+/* ChatGPT Intelligent UI: keep captured figures and charts legible within a chat bubble.
+   All provider classes and styles are stripped; these are app-owned presentation rules. */
+.msg.rich figure {
+  margin: 0.8em 0;
+  padding: 12px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--wash);
+}
+.msg.rich figcaption { margin-top: 8px; font-size: 0.9em; color: var(--soft); }
+.msg.rich img {
+  display: block;
+  max-width: 100%;
+  max-height: 520px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+}
+.msg.rich svg {
+  display: block;
+  max-width: 100%;
+  max-height: 400px;
+  height: auto;
+  color: var(--ink);
+  overflow: visible;
+}
+.msg.rich :is(figure, svg, img) { min-width: 0; }
+
 .msg.rich code {
   font-family: var(--mono);
   font-size: 0.94em;

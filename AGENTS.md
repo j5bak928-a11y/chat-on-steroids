@@ -3873,7 +3873,13 @@ timeline shows it from the loaded page or loads the page around it as history, c
 marked. Jump to latest from a history page whose end is not loaded opens the chat at its end. Primary-shortcut labels (`kbd[data-shortcut]`, the sidebar tooltip)
 come from `renderer/shortcuts.ts`: ⌘ on macOS, the localized Ctrl ("Strg") elsewhere.
 
-Captured ChatGPT HTML passes a strict allowlist; authored plain text stays text. Provider
+Captured ChatGPT HTML passes a strict allowlist; authored plain text stays text. Intelligent UI
+figures, HTTPS images and static SVG chart geometry survive as inert, bounded markup. When the
+page puts a visual sibling beside a Markdown block, only its exact same-conversation message
+wrapper can own that extra capture (`extension/fiber.js`); stale captures do not replace newer
+canonical prose. Form controls remain read-only prompt summaries in the desktop transcript;
+provider actions must still be performed in ChatGPT. The Electron CSP permits HTTPS image loads
+only, while scripts, remote connections and frames remain forbidden. Provider
 citation ranges use Unicode code points and map to UTF-16 before slicing. Exact uploaded-file
 names render as plain chips; unresolved file citations do not gain invented local links.
 An assistant message may carry `references`: the sources behind its inline

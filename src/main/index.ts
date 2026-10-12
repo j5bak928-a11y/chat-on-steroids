@@ -543,13 +543,14 @@ void app.whenReady().then(async () => {
   // state and does not run until its first coarse interval after this point.
   startAgentRuntimeGc();
 
-  // Strict CSP for our own page. There is no remote content and no inline script.
+  // Strict CSP for our own page. Read-only ChatGPT images may load over HTTPS;
+  // executable content, connections and frames remain local-only or denied.
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'none'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+          "default-src 'none'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
         ]
       }
     });

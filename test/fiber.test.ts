@@ -286,7 +286,7 @@ interface TurnFixture {
   viewStatus?: string;
   /** A visible `.markdown` block: its text, or markup when the test is about the markup. */
   rendered?: Array<string | { html: string; nativeId?: string; selectedMessageId?: string; selectedConversationId?: string;
-    fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string; pillFibers?: Fiber[] }>;
+    fiberProps?: Record<string, unknown>; fiber?: Fiber; staleMessageStamp?: string; pillFibers?: Fiber[]; siblingUi?: string }>;
   activities?: Array<{ label: string; fiber: Fiber; staleThoughtStamp?: string; v5?: boolean }>;
   images?: Array<{ assetId: string; clones?: number }>;
   staleStamp?: string;
@@ -398,6 +398,11 @@ async function scan(
         selection.setAttribute('data-chatgpt-selection-message-id', entry.selectedMessageId);
         if (entry.selectedConversationId) selection.setAttribute('data-chatgpt-selection-conversation-id', entry.selectedConversationId);
         selection.append(block);
+        if (entry.siblingUi) {
+          const ui = document.createElement('div');
+          ui.innerHTML = entry.siblingUi;
+          selection.append(ui);
+        }
         section.append(selection);
       } else section.append(block);
     }
@@ -1048,6 +1053,19 @@ describe('the calls a turn says it made', () => {
     expect(message.renderedHtml.length).toBeGreaterThan(120_000);
     expect(message.renderedHtml).toContain('END_OF_BRIEF');
     expect(message.renderedHtml).not.toContain('data-decor');
+  });
+
+  it('captures Intelligent UI alongside Markdown only from the matching ChatGPT message', async () => {
+    const id = 'visual-owner';
+    const result = await scan([], [{ id: 'visual-turn', messages: [authored(id, 'Here is the result.')],
+      rendered: [{ html: '<p>Here is the result.</p>', selectedMessageId: id, selectedConversationId: THREAD,
+        siblingUi: '<figure><img src="https://example.com/landscape.jpg" alt="Landscape"></figure>' }] }]);
+    expect(result.turns[0]!.messages[0]!.renderedHtml).toContain('Landscape');
+    expect(result.turns[0]!.messages[0]!.renderedHtml).toContain('Here is the result.');
+    const wrong = await scan([], [{ id: 'visual-turn', messages: [authored(id, 'Here is the result.')],
+      rendered: [{ html: '<p>Here is the result.</p>', selectedMessageId: id,
+        selectedConversationId: 'foreign-conversation', siblingUi: '<figure><img alt="Foreign"></figure>' }] }]);
+    expect(wrong.turns[0]!.messages[0]!.renderedHtml).not.toContain('Foreign');
   });
 
   it('does not give an unowned or foreign long block the larger final allowance', async () => {

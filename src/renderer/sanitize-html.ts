@@ -5,7 +5,30 @@ export interface HtmlSanitizerOptions {
   allowedTags: ReadonlySet<string>;
   dropTags: ReadonlySet<string>;
   safeHref: (value: string) => string | null;
+  safeImageSrc?: (value: string) => string | null;
   preserveDirection?: boolean;
+}
+
+// Only inert chart shapes and their numeric geometry survive a captured SVG.
+const SVG_SHAPES = new Set(['SVG', 'G', 'PATH', 'RECT', 'CIRCLE', 'ELLIPSE', 'LINE', 'POLYLINE', 'POLYGON', 'TEXT', 'TSPAN']);
+const SVG_NUMBERS = /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(?:[\s,]+[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)*$/i;
+const SVG_PATH = /^[\d\s,\.eE+\-MmLlHhVvCcSsQqTtAaZz]+$/;
+const SVG_COLOR = /^(?:none|currentColor|transparent|#[0-9a-f]{3,8}|rgba?\([\d.%\s,]+\))$/i;
+const SVG_NUMERIC_ATTRIBUTES = new Set(['x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'width', 'height', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'font-size']);
+function safeSvgAttributes(element: Element): Array<[string, string]> {
+  const result: Array<[string, string]> = [];
+  for (const attribute of [...element.attributes]) {
+    const name = attribute.name, value = attribute.value.trim();
+    if (!value || value.length > 20_000) continue;
+    if (name === 'viewBox' && element.tagName.toUpperCase() === 'SVG' && SVG_NUMBERS.test(value) && value.split(/[\s,]+/).length === 4) result.push([name, value]);
+    else if (SVG_NUMERIC_ATTRIBUTES.has(name) && value.length <= 50 && SVG_NUMBERS.test(value) && value.split(/[\s,]+/).length === 1) result.push([name, value]);
+    else if (name === 'd' && element.tagName.toUpperCase() === 'PATH' && SVG_PATH.test(value)) result.push([name, value]);
+    else if (name === 'points' && /^(?:POLYLINE|POLYGON)$/.test(element.tagName.toUpperCase()) && SVG_NUMBERS.test(value)) result.push([name, value]);
+    else if ((name === 'stroke' || name === 'fill') && SVG_COLOR.test(value)) result.push([name, value]);
+    else if (name === 'text-anchor' && /^(?:start|middle|end)$/.test(value)) result.push([name, value]);
+    else if (name === 'preserveAspectRatio' && element.tagName.toUpperCase() === 'SVG' && /^(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max)(?: meet| slice)?)$/.test(value)) result.push([name, value]);
+  }
+  return result;
 }
 
 /**
@@ -42,8 +65,21 @@ export function sanitizeHtmlTree(parent: ParentNode, options: HtmlSanitizerOptio
     const start = tag === 'OL' ? element.getAttribute('start') : null;
     const colSpan = tag === 'TD' || tag === 'TH' ? element.getAttribute('colspan') : null;
     const rowSpan = tag === 'TD' || tag === 'TH' ? element.getAttribute('rowspan') : null;
+    const imageSrc = tag === 'IMG' ? options.safeImageSrc?.(element.getAttribute('src') ?? '') : null;
+    const imageAlt = tag === 'IMG' ? element.getAttribute('alt') : null;
+    const svgAttributes = SVG_SHAPES.has(tag) && element.namespaceURI === 'http://www.w3.org/2000/svg' ? safeSvgAttributes(element) : [];
     for (const attribute of [...element.attributes]) element.removeAttribute(attribute.name);
+    for (const [name, value] of svgAttributes) element.setAttribute(name, value);
     if (resolvedDir) element.setAttribute('dir', resolvedDir);
+    if (tag === 'IMG') {
+      if (imageSrc) {
+        element.setAttribute('src', imageSrc);
+        element.setAttribute('loading', 'lazy');
+        element.setAttribute('referrerpolicy', 'no-referrer');
+        element.setAttribute('decoding', 'async');
+      }
+      if (imageAlt) element.setAttribute('alt', imageAlt.slice(0, 300));
+    }
     if (href) {
       element.setAttribute('href', href);
       element.setAttribute('target', '_blank');

@@ -1008,6 +1008,36 @@
       }
     }
 
+    // Intelligent UI charts and images can live beside (rather than inside)
+    // an authored Markdown node. Capture the full exact-message wrapper only
+    // when a substantial visual is outside Markdown. Never take a whole turn.
+    const visual = 'figure, img, svg[viewBox], [role="img"], [role="table"]';
+    for (let sectionAt = 0; sectionAt < sections.length; sectionAt++) {
+      let owners;
+      try { owners = sections[sectionAt].querySelectorAll('[data-chatgpt-selection-message-id], [data-message-id]'); }
+      catch { continue; }
+      for (const owner of owners) {
+        const selectedId = str(owner.getAttribute('data-chatgpt-selection-message-id'));
+        const id = selectedId || str(owner.getAttribute('data-message-id'));
+        if (!id || !assistantCandidates.some(candidate => candidate.id === id)) continue;
+        if (selectedId && (!conversationId || owner.getAttribute('data-chatgpt-selection-conversation-id') !== conversationId)) continue;
+        if (owner.parentElement?.closest('[data-chatgpt-selection-message-id], [data-message-id]')) continue;
+        if ([...owner.querySelectorAll('[data-chatgpt-selection-message-id], [data-message-id]')]
+          .some(child => (child.getAttribute('data-chatgpt-selection-message-id') || child.getAttribute('data-message-id')) !== id)) continue;
+        if (![...owner.querySelectorAll(visual)].some(node =>
+          !node.closest(MARKDOWN) && !node.closest(TOOL) && !node.closest(OWN_SURFACES))) continue;
+        // Another sibling claiming this identity is ambiguous; leave its
+        // text-only capture intact instead of attaching the wrong widget.
+        if ([...owners].some(other => other !== owner && !owner.contains(other) &&
+          (other.getAttribute('data-chatgpt-selection-message-id') || other.getAttribute('data-message-id')) === id)) continue;
+        for (let at = blocks.length - 1; at >= 0; at--) {
+          if (owner.contains(blocks[at])) { blocks.splice(at, 1); blockSections.splice(at, 1); }
+        }
+        blocks.push(owner);
+        blockSections.push(sectionAt);
+      }
+    }
+
     const used = new Set();
     const ids = [];
     for (let at = 0; at < blocks.length; at++) {

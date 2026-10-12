@@ -2082,17 +2082,48 @@ function textBlock(className: string, value: string, truncated: boolean, chars: 
 const RENDERED_TAGS = new Set([
   'A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'DIV', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
   'HR', 'KBD', 'LI', 'MARK', 'OL', 'P', 'PRE', 'S', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TABLE',
-  'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'UL'
+  'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'UL', 'FIGURE', 'FIGCAPTION', 'IMG',
+  'SVG', 'G', 'PATH', 'RECT', 'CIRCLE', 'ELLIPSE', 'LINE', 'POLYLINE', 'POLYGON', 'TEXT', 'TSPAN'
 ]);
 const DROP_RENDERED_TAGS = new Set([
-  'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'MATH', 'FORM', 'INPUT', 'BUTTON',
-  'TEXTAREA', 'SELECT', 'OPTION', 'META', 'LINK'
+  'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'MATH', 'FORM', 'INPUT', 'BUTTON',
+  'TEXTAREA', 'SELECT', 'OPTION', 'META', 'LINK', 'FOREIGNOBJECT', 'ANIMATE',
+  'ANIMATEMOTION', 'ANIMATETRANSFORM', 'SET', 'IMAGE', 'USE', 'FILTER', 'PATTERN'
 ]);
 
 function safeRenderedHref(value: string): string | null {
   const trimmed = value.trim();
   if (trimmed.startsWith('#')) return trimmed;
   return safeExternalLink(trimmed) ? trimmed : null;
+}
+
+function safeRenderedImageSrc(value: string): string | null {
+  // No data URLs, local files or protocol-relative links from page-controlled markup.
+  return value.length <= 2_000 && /^https:\/\/[^\s<>"']+$/i.test(value) ? value : null;
+}
+
+/** The recorded UI belongs to the current prose only if that prose is still on the page. */
+function currentVisualCapture(capture: StoredText | undefined, canonical: HTMLElement): boolean {
+  if (!capture?.text || capture.truncated || capture.text.length > MAX_RENDERED_HTML_CHARS) return false;
+  const template = document.createElement('template');
+  template.innerHTML = capture.text;
+  // Text-only captures remain governed by canonical Markdown and citation handling.
+  if (!template.content.querySelector('figure, img, svg[viewBox], [role="img"], [role="table"]')) return false;
+  const source = promptMatchText(canonical.textContent ?? '');
+  const shown = promptMatchText(template.content.textContent ?? '');
+  if (source.length < 12) return false;
+  if (shown.includes(source)) return true;
+  // Captured chart labels may sit *between* two canonical paragraphs. Accept
+  // ordered complete prose blocks, never just a few coincidentally shared words.
+  const blocks = [...canonical.children].map(child => promptMatchText(child.textContent ?? '')).filter(Boolean);
+  if (blocks.length < 2) return false;
+  let cursor = 0;
+  for (const block of blocks) {
+    const at = shown.indexOf(block, cursor);
+    if (at < 0) return false;
+    cursor = at + block.length;
+  }
+  return true;
 }
 
 const PROVIDER_CITATION = /^\uE200(?:cite|filecite)\uE202[^\uE200\uE201]*\uE201/;
@@ -2557,6 +2588,10 @@ export function renderedMarkdown(source: string, capture?: StoredText, reference
   const html = parser.parse(separateDisplayMath(text), { async: false });
   const box = renderedMessage({ text: html, chars: html.length, truncated: html.length > MAX_RENDERED_HTML_CHARS }, text);
   drawMath(box, math);
+  // New ChatGPT Intelligent UI often has no directive in canonical text: a Chart,
+  // media panel or image sits beside ordinary prose. Use its observed rendering
+  // only when that same prose is present, to avoid displaying an older revision.
+  if (currentVisualCapture(capture, box)) return renderedMessage(capture, text);
   if (capture?.text && !capture.truncated && capture.text.length <= MAX_RENDERED_HTML_CHARS) {
     const template = document.createElement('template');
     template.innerHTML = capture.text;
@@ -2609,6 +2644,7 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
     allowedTags: RENDERED_TAGS,
     dropTags: DROP_RENDERED_TAGS,
     safeHref: safeRenderedHref,
+    safeImageSrc: safeRenderedImageSrc,
     preserveDirection: true
   });
   // Only reapply our own presentation class, after the capture's untrusted classes are gone.

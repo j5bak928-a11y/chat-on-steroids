@@ -27,6 +27,45 @@ afterAll(() => {
 });
 
 describe('captured ChatGPT rendered HTML', () => {
+  it('shows Intelligent UI figures, images and charts without running captured code', () => {
+    const source = 'Here is the result.';
+    const capture = whole('<div><p>Here is the result.</p><figure><img src="https://images.example.org/photo.png" alt="Coast" onerror="alert(1)">' +
+      '<figcaption>Coastal view</figcaption></figure><svg viewBox="0 0 240 100" onload="alert(1)">' +
+      '<path d="M0 90 L120 10 L240 70" stroke="#16a34a" fill="none" onclick="alert(1)"/>' +
+      '<foreignObject><iframe src="https://evil.example"></iframe></foreignObject>' +
+      '<script>alert(1)</script></svg></div>');
+    const rendered = renderedMarkdown(source, capture);
+    expect(rendered.querySelector('figure figcaption')?.textContent).toBe('Coastal view');
+    expect(rendered.querySelector('img')?.getAttribute('src')).toBe('https://images.example.org/photo.png');
+    expect(rendered.querySelector('img')?.getAttribute('loading')).toBe('lazy');
+    expect(rendered.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 240 100');
+    expect(rendered.querySelector('path')?.getAttribute('stroke')).toBe('#16a34a');
+    expect(rendered.querySelector('script, iframe, foreignObject, [onload], [onerror], [onclick]')).toBeNull();
+    expect(rendered.textContent).toContain(source);
+  });
+
+  it('rejects stale Intelligent UI and executable image/SVG links while preserving the answer', () => {
+    const current = 'The new canonical answer.';
+    const stale = whole('<p>The previous response.</p><figure><img src="https://example.com/old.png" alt="old image"></figure>');
+    expect(renderedMarkdown(current, stale).querySelector('img')).toBeNull();
+    const unsafe = whole('<p>The new canonical answer.</p><figure><img src="data:image/svg+xml,<svg onload=alert(1)>" alt="unsafe"></figure>' +
+      '<svg viewBox="0 0 10 10"><a href="javascript:alert(1)"><circle r="5"/></a><path d="M0 0 L5 5" style="filter:url(https://evil.test)"/></svg>');
+    const rendered = renderedMarkdown(current, unsafe);
+    expect(rendered.querySelector('img')?.getAttribute('src')).toBeNull();
+    expect(rendered.querySelector('a[href], [style], [onload]')).toBeNull();
+    expect(rendered.querySelector('svg path')?.getAttribute('d')).toBe('M0 0 L5 5');
+    expect(rendered.textContent).toContain(current);
+    expect(renderedMarkdown('**Ordinary Markdown**').querySelector('strong')?.textContent).toBe('Ordinary Markdown');
+  });
+
+  it('keeps a chart between canonical paragraphs when its labels interrupt the prose', () => {
+    const source = 'The numbers are shown below.\n\nThe trend is improving each year.';
+    const capture = whole('<p>The numbers are shown below.</p><svg viewBox="0 0 300 200">' +
+      '<text x="10" y="20">2024</text><text x="100" y="20">2025</text>' +
+      '<path d="M0 150 L300 20" stroke="#00aa66"/></svg><p>The trend is improving each year.</p>');
+    expect(renderedMarkdown(source, capture).querySelector('svg path')).not.toBeNull();
+    expect(renderedMarkdown('Different current prose.', capture).querySelector('svg')).toBeNull();
+  });
   it('keeps the matching examples in the screenshot structured as Markdown, including the two warnings', () => {
     const answer = '## Examples from sample data\n\n' +
       '✅ **Strong matching candidate**\n\nCSV: `Sample product 20mg 30 tablets`\n\n' +
@@ -327,18 +366,21 @@ describe('captured ChatGPT rendered HTML', () => {
     expect(links[1]?.getAttribute('rel')).toBe('noreferrer noopener');
   });
 
-  it('drops SVG and MathML namespace content instead of letting it bypass the sanitizer', () => {
+  it('retains inert SVG geometry while discarding namespace scripts and embedded content', () => {
     const rendered = renderedMessage(
       whole(
         '<p>before</p>' +
-          '<svg onload="alert(1)"><foreignObject><p>svg payload</p></foreignObject></svg>' +
+          '<svg viewBox="0 0 20 20" onload="alert(1)"><path d="M1 1 L10 10"/>' +
+          '<foreignObject><p>svg payload</p></foreignObject></svg>' +
           '<math><mtext>math payload</mtext></math>' +
           '<script>alert(2)</script><p>after</p>'
       ),
       'fallback'
     );
 
-    expect(rendered.querySelector('svg')).toBeNull();
+    expect(rendered.querySelector('svg path')?.getAttribute('d')).toBe('M1 1 L10 10');
+    expect(rendered.querySelector('svg')?.getAttribute('onload')).toBeNull();
+    expect(rendered.querySelector('foreignObject')).toBeNull();
     expect(rendered.querySelector('math')).toBeNull();
     expect(rendered.querySelector('script')).toBeNull();
     expect(rendered.textContent).toBe('beforeafter');
