@@ -13295,9 +13295,11 @@
   async function refreshManagedPlugin(request) {
     if (pluginRefreshBusy || !request || !/^[a-f0-9-]{36}$/i.test(request.id) || !ownsPluginRefreshPage(request.id)) return false;
     pluginRefreshBusy = true;
-    const requestEpoch = epoch;
-    const ownsRequest = () => epoch === requestEpoch && ownsPluginRefreshPage(request.id);
-    const fail = error => ask({ type: 'plugin_refresh', action: 'fail', id: request.id, error });
+    const requestEpoch = epoch, requestHref = location.href;
+    // Settings routes share a conversation epoch. A different marked settings URL is
+    // still a navigation, never permission to act or attribute this page's failed read.
+    const ownsRequest = () => epoch === requestEpoch && location.href === requestHref && ownsPluginRefreshPage(request.id);
+    const fail = error => ownsRequest() ? ask({ type: 'plugin_refresh', action: 'fail', id: request.id, error }, ownsRequest) : null;
     const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value);
     const schemaKey = tools => Array.isArray(tools) ? canonical(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })).sort((a, b) => a.name.localeCompare(b.name))) : null;
     try {
@@ -13312,16 +13314,33 @@
           if (!current()) return false;
           location.assign(url.href); return true;
         }
-        const buttons = await waitPageView(() => CLF_DOM.pluginInstalledButtons(request.connectorName), current, 8000);
+        let linkHref = null;
+        const buttons = await waitPageView(() => {
+          const found = CLF_DOM.pluginInstalledButtons(request.connectorName);
+          linkHref = found?.length === 1 && found[0].tagName === 'A' ? found[0].href : null;
+          return found;
+        }, current, 8000);
         if (!buttons || !current()) return false;
         if (buttons.length !== 1) {
           await fail(t(
             'content_connector_identity_ambiguous',
-            'Installed connector identity is unavailable or ambiguous'
+            'Installed plugin identity is unavailable or ambiguous'
           ));
           return false;
         }
-        buttons[0].click();
+        const button = buttons[0];
+        if (button.tagName === 'A') {
+          // The native installed link already names an exact management route. Recheck
+          // the same visible owner across the await and carry custody into navigation;
+          // reading the destination's schema is a later step, not a prerequisite here.
+          const found = CLF_DOM.pluginInstalledButtons(request.connectorName);
+          if (!current() || !button.isConnected || found?.length !== 1 || found[0] !== button || button.href !== linkHref) return false;
+          const url = new URL(linkHref, requestHref);
+          if (url.origin !== listUrl.origin || !/^\/settings\/plugins-settings\/plugin_asdk_app_[a-zA-Z0-9_-]+$/.test(url.pathname) || url.hash) return false;
+          url.searchParams.set('cos-plugin-refresh', request.id);
+          location.assign(url.href); return true;
+        }
+        button.click();
         // The provider's installed-row navigation drops the query marker. This
         // already-owned discovery may learn its resulting exact App Id, but cannot
         // claim Refresh until the management document has its marker again.
@@ -13359,7 +13378,7 @@
         // cause in the durable row, which is the opposite of the point.
         if (current()) await fail(t(
           'content_connector_settings_unreadable',
-          'The connector settings card could not be read on the page this request owns'
+          'The plugin settings card could not be read on the page this request owns'
         ));
         return false;
       }
@@ -13367,7 +13386,7 @@
       if (request.appId && view.appId !== request.appId) {
         await fail(t(
           'content_connector_settings_unverified',
-          'Exact connector settings could not be verified'
+          'Exact plugin settings could not be verified'
         ));
         return false;
       }
@@ -13375,28 +13394,37 @@
       const stillCurrent = () => current() && epoch === ownedEpoch && pluginViewAppId(location.href) === appId;
       const before = schemaKey(view.tools), expected = schemaKey(request.tools);
       if (before === expected) {
-        return (await ask({ type: 'plugin_refresh', action: 'current', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId }))?.data?.ok === true && stillCurrent();
+        return (await ask({ type: 'plugin_refresh', action: 'current', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId }, stillCurrent))?.data?.ok === true && stillCurrent();
+      }
+      if (request.observeOnly) {
+        await fail(t('content_connector_settings_unverified', 'Exact plugin settings could not be verified'));
+        return false;
       }
       if (!view.refresh || view.refresh.disabled) {
         const error = t(
           'content_connector_schema_no_refresh',
-          'Connector schema differs, but ChatGPT exposes no Refresh control. Recreate or republish this custom app to load the current tool schema.'
+          'Plugin schema differs, but ChatGPT exposes no Refresh control. Recreate or republish this plugin to load the current tool schema.'
         );
-        return (await ask({ type: 'plugin_refresh', action: 'manual', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId, error }))?.data?.ok === true && stillCurrent();
+        return (await ask({ type: 'plugin_refresh', action: 'manual', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId, error }, stillCurrent))?.data?.ok === true && stillCurrent();
       }
-      const claimed = await ask({ type: 'plugin_refresh', action: 'claim', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId });
+      const claimed = await ask({ type: 'plugin_refresh', action: 'claim', id: request.id, appId, connectorName: request.connectorName, tools: view.tools, tunnelId }, stillCurrent);
       if (!claimed?.data?.ok || !stillCurrent() || view.refresh.isConnected === false || view.refresh.disabled) {
         await fail(t(
           'content_connector_refresh_claim_unconfirmed',
-          'Connector refresh claim or page ownership was not confirmed'
+          'Plugin refresh claim or page ownership was not confirmed'
         ));
         return false;
       }
       view.refresh.click(); // the durable main-process attempt owns this one click
+      // The page does not show the tool list, so the new tools arriving changes no element: a
+      // wait that looked only on page changes saw them when the Refresh button turned active
+      // again, about 10 s later, and gave up at 12 s. Measured on Windows 2026-10-13, it recorded
+      // a refresh that had worked as failed in 2 of 3 runs. Look every half second, for up to a
+      // minute (the worker leaves a busy tab open); the one click stays one click.
       const after = await waitPageView(async () => {
         const next = await CLF_DOM.pluginRefreshView(request.connectorName, request.tools, appId);
         return next && before !== expected && schemaKey(next.tools) === expected ? next : null;
-      }, stillCurrent, 12000);
+      }, stillCurrent, 60000, 500);
       if (!after) {
         await fail(t(
           'content_connector_refresh_schema_unchanged',
@@ -13404,9 +13432,9 @@
         ));
         return false;
       }
-      return (await ask({ type: 'plugin_refresh', action: 'complete', id: request.id, appId, tools: after.tools, versionId: after.versionId }))?.data?.ok === true;
+      return (await ask({ type: 'plugin_refresh', action: 'complete', id: request.id, appId, tools: after.tools, versionId: after.versionId }, stillCurrent))?.data?.ok === true;
     } catch {
-      await fail(t('content_connector_refresh_unverified', 'Connector refresh could not be verified'));
+      await fail(t('content_connector_refresh_unverified', 'Plugin refresh could not be verified'));
       return false;
     }
     finally { pluginRefreshBusy = false; }

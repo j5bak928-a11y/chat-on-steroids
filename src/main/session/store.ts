@@ -160,6 +160,7 @@ export function initSessionStore(userDataDir: string): void {
   recentUnreadableWarned.clear();
   sessionAssetUsage.clear();
   globalAssetUsage = null;
+  recordingStoreFull = false;
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
@@ -246,6 +247,30 @@ export const MAX_GLOBAL_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
 
 const sessionAssetUsage = new Map<string, number>();
 let globalAssetUsage: number | null = null;
+const GLOBAL_ASSET_QUOTA_EXCEEDED = 'Global session asset quota exceeded';
+// A full store is one state the app shows, not one log warning per refused write (#1406).
+let recordingStoreFull = false;
+const recordingStoreFullListeners = new Set<() => void>();
+
+function setRecordingStoreFull(full: boolean): void {
+  if (recordingStoreFull === full) return;
+  recordingStoreFull = full;
+  if (full) logWarn('recording storage is full (2 GiB): new images and long texts are not saved until space is freed');
+  else logInfo('recording storage has room again');
+  for (const listener of recordingStoreFullListeners) {
+    try { listener(); } catch (err) { logWarn(`recording storage listener failed: ${(err as Error).message}`); }
+  }
+}
+
+/** True from a write refused by the 2 GiB limit until space is free again. */
+export function recordingStorageFull(): boolean {
+  return recordingStoreFull;
+}
+
+export function onRecordingStorageFullChange(listener: () => void): () => void {
+  recordingStoreFullListeners.add(listener);
+  return () => { recordingStoreFullListeners.delete(listener); };
+}
 let assetWriteQueue = Promise.resolve();
 let assetMutationEpoch = 0;
 const assetWrittenEpoch = new Map<string, number>();
@@ -1942,7 +1967,14 @@ export async function readHandoffResponse(sessionId: string, conversationId: str
   if (entry.nextSeq !== revision || events.length >= MAX_EVENT_TAIL) return pending;
   const turns = entry.summary.timelineTurns;
   const next = events.findIndex(event => event.kind === 'user_message' && !injectedUserMessage(event, turns));
-  const interval = next < 0 ? events : events.slice(0, next);
+  // The source turn can end after the handoff was sent: an interrupted or stopped turn whose end
+  // the page reports only on its next load. That end belongs to the turn before the request, so a
+  // bare `turn_end` of a turn with no start and no answer in this interval is not a second answer.
+  // On 2026-10-12 such an end, recorded with the handoff, kept a finished brief from being captured.
+  const bounded = next < 0 ? events : events.slice(0, next);
+  const answering = new Set(bounded.filter(event => event.kind === 'turn_start' || event.kind === 'assistant_message')
+    .flatMap(event => event.turnId ? [responseTurnId(turns, event.turnId)] : []));
+  const interval = bounded.filter(event => event.kind !== 'turn_end' || !event.turnId || answering.has(responseTurnId(turns, event.turnId)));
   const generations = new Set<string>();
   for (const event of interval) {
     if (event.kind === 'user_message') continue;
@@ -2874,6 +2906,8 @@ function comesAfterCursor(summary: SessionSummary, cursor: SessionListCursor): b
 export async function listSessionPage(options: {
   limit?: number;
   cursor?: SessionListCursor;
+  /** Only this project's sessions (#1190). `total` stays the whole retained history. */
+  projectId?: string;
 } = {}): Promise<SessionPage> {
   const catalog = await ensureAttachmentCatalog();
   const limit = Math.max(1, Math.min(MAX_LISTED_SESSIONS, Math.floor(options.limit ?? MAX_LISTED_SESSIONS)));
@@ -2884,6 +2918,7 @@ export async function listSessionPage(options: {
   // or a handful, so overlay them explicitly instead of rebuilding/sorting every retained row.
   for (const entry of open.values()) {
     if (entry.summary.origin?.kind === 'helper') continue;
+    if (options.projectId && entry.summary.projectId !== options.projectId) continue;
     if (options.cursor && !comesAfterCursor(entry.summary, options.cursor)) continue;
     candidates.push({ ...entry.summary, chatIds: [...entry.summary.chatIds], agents: [...entry.summary.agents] });
   }
@@ -2897,6 +2932,7 @@ export async function listSessionPage(options: {
     if (openIds.has(id)) continue;
     const summary = catalog.summaries.get(id);
     if (!summary || summary.origin?.kind === 'helper' || (options.cursor && !comesAfterCursor(summary, options.cursor))) continue;
+    if (options.projectId && summary.projectId !== options.projectId) continue;
     if (durableEligible > limit) {
       durableHasMore = true;
       break;
@@ -3577,11 +3613,15 @@ export async function writeAsset(
     const used = await sessionAssetBytesOnDisk(sessionId);
     const globalUsed = await globalAssetBytesOnDisk();
     if (used + data.length > MAX_SESSION_ASSET_BYTES) throw new Error('Session asset quota exceeded');
-    if (globalUsed + data.length > MAX_GLOBAL_ASSET_BYTES) throw new Error('Global session asset quota exceeded');
+    if (globalUsed + data.length > MAX_GLOBAL_ASSET_BYTES) {
+      setRecordingStoreFull(true);
+      throw new Error(GLOBAL_ASSET_QUOTA_EXCEEDED);
+    }
     try {
       await fs.writeFile(target, data, { flag: 'wx' });
       sessionAssetUsage.set(sessionId, used + data.length);
       globalAssetUsage = globalUsed + data.length;
+      setRecordingStoreFull(false);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
@@ -3951,6 +3991,7 @@ export async function clearImageStorage(mode: ImageStorageClearMode): Promise<Im
       sessionAssetUsage.clear();
       globalAssetUsage = null;
       const after = await imageStorageInventory(false);
+      if (after.usedBytes < MAX_GLOBAL_ASSET_BYTES) setRecordingStoreFull(false);
       return { freedBytes, removedFiles, usedBytes: after.usedBytes, limitBytes: MAX_GLOBAL_ASSET_BYTES };
     } catch (error) {
       rejectSelection(error);
@@ -4022,7 +4063,8 @@ export async function writeOverflowText(sessionId: string, text: string): Promis
     const asset = await writeAsset(sessionId, Buffer.from(text, 'utf8'), 'text/plain');
     return asset.id;
   } catch (err) {
-    logWarn(`session ${sessionId}: overflow text not stored: ${(err as Error).message}`);
+    // The full store is reported once, as a state; every other reason is worth its own line.
+    if ((err as Error).message !== GLOBAL_ASSET_QUOTA_EXCEEDED) logWarn(`session ${sessionId}: overflow text not stored: ${(err as Error).message}`);
     return null;
   }
 }
@@ -4132,6 +4174,8 @@ export function resetSessionStoreForTests(): void {
   traceCache.clear();
   sessionAssetUsage.clear();
   globalAssetUsage = null;
+  recordingStoreFull = false;
+  recordingStoreFullListeners.clear();
   assetMutationEpoch = 0;
   assetWrittenEpoch.clear();
   removedAssetEpoch.clear();
